@@ -1,92 +1,58 @@
-mod commands;
+#[macro_use]
+extern crate log;
 
-use std::{collections::HashSet, fs::File, io::BufReader, usize};
+use std::env;
 
-use serenity::async_trait;
-use serenity::framework::standard::{
-    help_commands,
-    macros::{group, help},
-    Args, CommandGroup, CommandResult, HelpOptions,
-};
-use serenity::framework::StandardFramework;
-use serenity::model::{channel::Message, gateway::Ready, id::UserId};
-use serenity::prelude::{Client, Context, EventHandler};
-
-use serde::{Deserialize, Serialize};
-use serde_json::Result;
-
-use commands::{neko::*};
-
-// Handler構造体．取得したいイベントを実装する
-struct Handler;
-
-#[async_trait]
-impl EventHandler for Handler {
-    // Botが起動したときに走る処理
-    async fn ready(&self, _: Context, ready: Ready) {
-        // デフォルトでC言語のprintfのようなことができる
-        println!("{} is connected!", ready.user.name);
-    }
+#[derive(thiserror::Error, Debug)]
+enum AppError {
+    #[error("{0}")]
+    Serenity(#[from] poise::serenity::Error),
 }
 
-use commands::neko::*;
+type Context<'a> = poise::Context<'a, (), AppError>;
 
-#[group]
-#[description("汎用コマンド")]
-#[summary("一般")]
-#[commands(neko)]
-struct General;
-
-#[help] // Helpコマンド
-#[individual_command_tip = "これはヘルプコマンド"] // Helpコマンドの説明
-#[strikethrough_commands_tip_in_guild = ""] // 使用できないコマンドについての説明を削除
-async fn my_help(
-    ctx: &Context,
-    msg: &Message,
-    args: Args,
-    help_options: &'static HelpOptions,
-    groups: &[&'static CommandGroup],
-    owners: HashSet<UserId>,
-) -> CommandResult {
-    // _ は使用しない返り値を捨てることを明示している
-    let _ = help_commands::with_embeds(ctx, msg, args, help_options, groups, owners).await;
-    // 空のタプルをreturn（仕様）
-    // Rustでは`;`なしの行は値としてreturnすることを表す
-    // return Ok(()); と同義
+#[poise::command(prefix_command, hide_in_help)]
+async fn register(ctx: Context<'_>, #[flag] global: bool) -> Result<(), AppError> {
+    poise::builtins::register_application_commands(ctx, global).await?;
     Ok(())
 }
-#[derive(Serialize, Deserialize)]
-struct Token {
-    token: String,
+
+/// Add two number.
+#[poise::command(prefix_command, slash_command)]
+async fn add(
+    ctx: Context<'_>,
+    #[description = "The first number."] a: i32,
+    #[description = "The second number."] b: i32,
+) -> Result<(), AppError> {
+    poise::say_reply(ctx, format!("{}", a + b)).await?;
+    Ok(())
 }
 
-//{"token": "This_is_Token"} の形のトークンを取り出す関数
-fn get_token(file_name: &str) -> Result<String> {
-    let file = File::open(file_name).unwrap();
-    let reader = BufReader::new(file);
-    let t: Token = serde_json::from_reader(reader).unwrap();
-    Ok(t.token)
+async fn on_error(error: poise::FrameworkError<'_, (), AppError>) {
+    error!("{:?}", error);
 }
+
 #[tokio::main]
 async fn main() {
-    // Discord Bot Token を設定
-    let token = get_token("config.json").expect("Err トークンが見つかりません");
-    // コマンド系の設定
-    let framework = StandardFramework::new()
-        // |c| c はラムダ式
-        .configure(|c| c.prefix("~")) // コマンドプレフィックス
-        .help(&MY_HELP) // ヘルプコマンドを追加
-        .group(&GENERAL_GROUP); // general を追加するには,GENERAL_GROUP とグループ名をすべて大文字にする
+    dotenv::dotenv().ok();
+    env_logger::init();
+    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
 
-    // Botのクライアントを作成
-    let mut client = Client::builder(&token)
-        .event_handler(Handler) // 取得するイベント
-        .framework(framework) // コマンドを登録
+    let options = poise::FrameworkOptions {
+        commands: vec![register(), add()],
+        prefix_options: poise::PrefixFrameworkOptions {
+            prefix: Some("::".to_string()),
+            ..Default::default()
+        },
+        on_error: |err| Box::pin(on_error(err)),
+        ..Default::default()
+    };
+
+    poise::Framework::build()
+        .token(token)
+        .options(options)
+        .user_data_setup(|_, _, _| Box::pin(async { Ok(()) }))
+        .run()
         .await
-        .expect("Err creating client"); // エラーハンドリング
-
-    // メインループ．Botを起動
-    if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
-    }
+        .unwrap();
 }
